@@ -3,6 +3,7 @@
 // to support long args with a "-" prefix.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![allow(dead_code)]
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display};
@@ -30,6 +31,13 @@ pub enum Error {
     /// Failed to parse a raw free-standing argument.
     #[allow(missing_docs)]
     ArgumentParsingFailed { cause: String },
+
+    /// Requested size of the value set doesn't fit into args length.
+    ValueSetTooLong {
+        value_set_size: usize,
+        key_index: usize,
+        args_length: usize,
+    },
 }
 
 impl Display for Error {
@@ -52,6 +60,13 @@ impl Display for Error {
             }
             Error::ArgumentParsingFailed { cause } => {
                 write!(f, "failed to parse a binary argument: {}", cause)
+            }
+            Error::ValueSetTooLong {
+                value_set_size,
+                key_index,
+                args_length,
+            } => {
+                write!(f, "value set size {value_set_size} is too long, flag is at {key_index} and there are {args_length} total arguments")
             }
         }
     }
@@ -194,6 +209,51 @@ impl Arguments {
         <T as FromStr>::Err: Display,
     {
         self.opt_value_from_fn(keys, FromStr::from_str)
+    }
+
+    /// Parses an option value set, identified by the key.
+    #[inline(never)]
+    pub fn opt_value_set_from_str<A, T>(&mut self, key: A, size: usize) -> Result<Option<T>, Error>
+    where
+        A: Into<Key>,
+        T: FromStr,
+        <T as FromStr>::Err: Display,
+    {
+        if let Some((idx, _)) = self.index_of(key.into()) {
+            // Add one to account for zero indexing.
+            if self.0.len() < idx + size + 1 {
+                return Err(Error::ValueSetTooLong {
+                    value_set_size: size,
+                    key_index: idx,
+                    args_length: self.0.len(),
+                });
+            }
+            let mut set = "".to_string();
+            for i in 1..=size {
+                // It's okay to unwrap this because we checked befoe
+                // there are enough args.
+                let val = os_to_str(self.0.get(idx + i).unwrap())?;
+                // Make sure each field is space separated, as it
+                // would appear on the command line.
+                if !set.is_empty() {
+                    set.push(' ');
+                }
+                set.push_str(val);
+            }
+            match set.parse() {
+                Ok(v) => {
+                    // Don't remove anything until everything has been
+                    // checked.
+                    self.0.drain(idx..=(idx + size));
+                    Ok(Some(v))
+                },
+                Err(err) => Err(Error::ArgumentParsingFailed {
+                    cause: err.to_string(),
+                }),
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     /// Parses an optional key-value pair using a specified function.
