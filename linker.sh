@@ -4,7 +4,11 @@
 here="$(dirname $(realpath $0))"
 pushd $here
 cargo build --quiet
-popd
+popd &>/dev/null
+
+# Enable tracing so that that we can copy the linker invocation if
+# need be.
+set -x
 
 # Run the linker binary, passing through all the given args.
-$here/target/debug/nicks-linker $@
+RUST_LOG=warn,nicks_linker=debug $here/target/debug/nicks-linker $@
