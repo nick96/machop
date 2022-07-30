@@ -1,8 +1,22 @@
+use std::{
+    ffi::{OsStr, OsString},
+    fmt::Display,
+};
 pub(crate) use std::{path::PathBuf, str::FromStr};
 
-#[derive(Debug)]
+use llvm_option_parser::{ParsedArgument, ParsedArguments};
+
+#[derive(Debug, Clone)]
 pub enum Architecture {
     ARM64,
+}
+
+impl Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Architecture::ARM64 => write!(f, "arm64"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -63,63 +77,122 @@ impl FromStr for Architecture {
     }
 }
 
-impl ToString for Architecture {
-    fn to_string(&self) -> String {
-        match self {
-            Architecture::ARM64 => "arm64".to_string(),
-        }
-    }
-}
-
 impl Args {
     pub fn from_env() -> Result<Self, String> {
-        let mut cli_args = crate::arg_parser::Arguments::from_env();
-        if cli_args.contains("-help") {
-            usage();
-            std::process::exit(1)
-        }
-        // Grab the ambiguous arguments we don't care about and throw
-        // them away.
-        let _: String = cli_args
-            .value_from_str("-lto_library")
-            .map_err(|e| e.to_string())?;
+        let options = llvm_command_parser::llvm_13_options("lld-macho").unwrap();
+        let mut args = std::env::args_os();
+        // Fist arg is the name of the executable.
+        args.next();
+        let lld_args: ParsedArguments = options
+            .parse_arguments(args)
+            .map_err(|e| e.to_string())?
+            .resolve_aliases(&options)
+            .unwrap();
+        log::trace!("parsed args: {lld_args:#?}");
 
-        let arch = cli_args
-            .value_from_str("-arch")
-            .map_err(|e| e.to_string())?;
+        let mut object_files: Vec<PathBuf> = vec![];
+        let mut libraries: Vec<String> = vec![];
+        let mut sys_lib_root: Option<PathBuf> = None;
+        let mut dynamic = false;
+        let mut no_deduplicate = false;
+        let mut demangle = false;
+        let mut output_file = None;
+        let mut platform_version: Option<PlatformVersion> = None;
+        let mut library_search_paths: Vec<PathBuf> = vec![];
+        let mut arch: Option<Architecture> = None;
+        for lld_arg in lld_args.parsed() {
+            use llvm_option_parser::ParsedArgument::*;
+            match lld_arg {
+                Unknown(flag) => {
+                    log::warn!("Unknown flag {}", flag.to_string_lossy())
+                }
+                Positional(value) => object_files.push(value.into()),
 
-        let sys_lib_root = cli_args
-            .opt_value_from_str("-syslibroot")
-            .map_err(|e| e.to_string())?;
-
-        // Make sure the search paths specified via the CLI have
-        // higher precedence over the default ones.
-        let mut library_search_paths = cli_args.values_from_str("-L").map_err(|e| e.to_string())?;
-        let mut default_library_search_paths = vec!["/usr/lib".into(), "/usr/local/lib".into()];
-
-        library_search_paths.append(&mut default_library_search_paths);
-        let libraries = cli_args.values_from_str("-l").map_err(|e| e.to_string())?;
-        let output_file = cli_args.value_from_str("-o").map_err(|e| e.to_string())?;
-        let demangle = cli_args.contains("-demangle");
-        let deduplicate = !cli_args.contains("-no_deduplicate");
-        let dynamic = cli_args.contains("-dynamic");
-        let platform_version: Option<PlatformVersion> = cli_args
-            .opt_value_set_from_str("-platform_version", 3)
-            .map_err(|e| e.to_string())?;
-        let object_files = cli_args
-            .finish()
-            .iter()
-            .filter_map(|value| {
-                let p: PathBuf = value.into();
-                match p.extension().map(|e| e.to_str().unwrap()) {
-                    Some("o") | Some("rlib") | Some("a") => Some(p),
-                    _ => {
-                        log::debug!("{:?} not handled", value);
-                        None
+                Flag(option) => {
+                    if option.matches_exact(OsStr::new("-help")) {
+                        usage();
+                        std::process::exit(1)
+                    } else if option.matches_exact(OsStr::new("-dynamic")) {
+                        dynamic = true;
+                    } else if option.matches_exact(OsStr::new("-no_deduplicate")) {
+                        no_deduplicate = true;
+                    } else if option.matches_exact(OsStr::new("-demangle")) {
+                        demangle = true;
+                    } else {
+                        log::warn!("Flag {} not handled", option.name)
                     }
                 }
-            })
-            .collect();
+                SingleValue(option, value) => {
+                    if option.matches_exact(OsStr::new("-o")) {
+                        output_file = Some(PathBuf::from(value));
+                    } else if option.matches_exact(OsStr::new("-arch")) {
+                        arch = Some(value.to_str().unwrap().parse()?);
+                    } else if option.matches_exact(OsStr::new("-lto_library")) {
+                    } else if option.matches_exact(OsStr::new("-syslibroot")) {
+                        sys_lib_root = Some(value.into());
+                    } else if option.matches_exact(OsStr::new("-L")) {
+                        library_search_paths.push(value.into());
+                    } else if option.matches_exact(OsStr::new("-l")) {
+                        libraries.push(value.to_os_string().into_string().unwrap());
+                    } else {
+                        log::warn!(
+                            "Flag {} with value {} not handled",
+                            option.name,
+                            value.to_string_lossy(),
+                        )
+                    }
+                }
+                SingleValueKeyed(option, key, value) => {
+                    log::warn!(
+                        "Single keyed value flag {} with {}={} not handled",
+                        option.name,
+                        key.to_string_lossy(),
+                        value.to_string_lossy()
+                    )
+                }
+                CommaValues(option, comma_separated_values) => {
+                    log::warn!(
+                        "Comma separated flag {} with value {} not handled",
+                        option.name,
+                        comma_separated_values.to_string_lossy()
+                    );
+                }
+                MultipleValues(option, values) => {
+                    if option.matches_exact(OsStr::new("-platform_version")) {
+                        let s: Vec<String> = values
+                            .iter()
+                            .map(|os| os.to_os_string().into_string())
+                            .collect::<Result<Vec<String>, OsString>>()
+                            .unwrap();
+                        platform_version = Some(s.join(" ").parse()?);
+                    } else {
+                        log::warn!(
+                            "Multi value flag {} with value {:?} not handled",
+                            option.name,
+                            values
+                        )
+                    }
+                }
+                MultipleValuesKeyed(option, key, comma_separated_values) => {
+                    log::warn!(
+                        "Multi value keyed flag {} with value {}={:?} not handled",
+                        option.name,
+                        key.to_string_lossy(),
+                        comma_separated_values
+                    )
+                }
+            }
+        }
+
+        if arch.is_none() {
+            return Err("-arch must be provided".into());
+        }
+        let arch = arch.unwrap();
+
+        if output_file.is_none() {
+            return Err("-output_file must be provided".into());
+        }
+        let output_file = output_file.unwrap();
 
         Ok(Args {
             arch,
@@ -129,7 +202,7 @@ impl Args {
             object_files,
             sys_lib_root,
             demangle,
-            deduplicate,
+            deduplicate: !no_deduplicate,
             dynamic,
             platform_version,
         })
@@ -139,7 +212,7 @@ impl Args {
 fn usage() {
     eprintln!(
         r#"
-nicks-linker
+machop
 
 Options:
 
