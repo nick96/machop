@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 /// Parse .tbd files.
 use crate::linker_args::Architecture;
@@ -34,8 +34,8 @@ impl std::fmt::Display for Error {
 
 #[derive(Debug)]
 pub struct TbdDylib {
-    pub install_name: String,
-    pub reexported_libraries: Vec<String>,
+    pub install_name: PathBuf,
+    pub reexported_libraries: Vec<PathBuf>,
     pub exports: Vec<String>,
     pub weak_exports: Vec<String>,
 }
@@ -62,7 +62,7 @@ impl TbdDylib {
         // We know there is at least one element in tbds so this won't
         // panic.
         let mut main = tbds.remove(0);
-        let tbds_by_install_name: HashMap<&String, &TbdDylib> =
+        let tbds_by_install_name: HashMap<&PathBuf, &TbdDylib> =
             tbds.iter().map(|tbd| (&tbd.install_name, tbd)).collect();
         let mut exports = vec![];
         let mut weak_exports = vec![];
@@ -111,7 +111,7 @@ impl TbdDylib {
                     .iter()
                     .any(|triple| match_arch(arch, triple))
                 {
-                    reexport.libraries
+                    reexport.libraries.iter().map(PathBuf::from).collect()
                 } else {
                     vec![]
                 }
@@ -143,7 +143,7 @@ impl TbdDylib {
         // TODO: ObjC symbols
 
         Ok(Some(TbdDylib {
-            install_name: tbd.install_name,
+            install_name: PathBuf::from(tbd.install_name),
             reexported_libraries,
             exports: all_exports,
             weak_exports: all_weak_exports,
