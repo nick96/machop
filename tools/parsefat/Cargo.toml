@@ -1,0 +1,7 @@
+[package]
+name = "parsefat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+goblin = { version = "0.5.2" }
