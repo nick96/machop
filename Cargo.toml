@@ -1,5 +1,8 @@
+[workspace]
+members = [ "tools/parsefat" ]
+
 [package]
-name = "nicks-linker"
+name = "machop"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,7 +10,12 @@ edition = "2021"
 
 [dependencies]
 env_logger = { version = "0.9.0", default_features = false }
+faerie = "0.16.0"
 goblin = { version = "0.5.2" }
 log = { version = "0.4.17", default_features = false }
+target-lexicon = "0.11"
 text-stub-library = { git = "https://github.com/nick96/PyOxidizer.git", branch = "main" }
+llvm-command-parser = { git = "https://github.com/indygreg/toolchain-tools.git", branch = "main" }
+llvm-option-parser = { git = "https://github.com/indygreg/toolchain-tools.git", branch = "main" }
+byteorder = "1.4.3"
 
