@@ -1,28 +1,22 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     error::Error,
     fmt::{Debug, Display},
     fs::Permissions,
-    io::Cursor,
+    os::unix::prelude::PermissionsExt,
     path::PathBuf,
 };
 
-use byteorder::{BigEndian, ReadBytesExt};
-use faerie::ArtifactBuilder;
-use goblin::{
-    archive,
-    mach::{
-        cputype::CPU_TYPE_ARM64,
-        header::{filetype_to_str, MH_DYLIB, MH_EXECUTE},
-        symbols::{Nlist, Nlist64},
-        MachO,
-    },
+use goblin::mach::{
+    cputype::CPU_TYPE_ARM64,
+    header::{filetype_to_str, MH_DYLIB, MH_EXECUTE},
+    symbols::Nlist,
+    MachO, SingleArch,
 };
 use machop::{
     linker_args::{Architecture, Args},
     tbd::{self, TbdDylib},
 };
-use target_lexicon::ArmArchitecture;
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -113,7 +107,7 @@ fn main() {
     // it first. Maybe it'd be better to just use a set?
     args.library_search_paths.sort();
     args.library_search_paths.dedup();
-    log::debug!("Arg: {:?}", args);
+    log::debug!("Arg: {:#?}", args);
     // args.object_files = vec![args.object_files.first().unwrap().to_owned()];
     // args.libraries = vec![];
     let mut object_files = vec![];
@@ -144,6 +138,7 @@ fn main() {
             log::warn!("Unable to find libary {}", library);
         }
     }
+    log::trace!("Object files: {:?}", object_files);
     let object_contents = object_files
         .iter()
         .map(|object_file_path| std::fs::read(&object_file_path).map_err(|e| e.to_string()))
@@ -151,9 +146,10 @@ fn main() {
         .unwrap();
     let objects = object_contents
         .iter()
-        .map(|object_content| {
+        .enumerate()
+        .map(|(i, object_content)| {
             Object::parse(object_content.as_slice())
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string() + &format!(" xxx {}", i))
                 .unwrap()
         })
         .collect::<Vec<Object>>();
@@ -178,26 +174,18 @@ fn main() {
                         })
                         .unwrap();
                     match fat.get(arch_position) {
-                        Ok(macho) => {
-                            if macho.is_object_file() {
-                                objs.push(macho);
+                        Ok(entry) => match entry {
+                            SingleArch::MachO(macho) => {
+                                if macho.is_object_file() {
+                                    objs.push(macho);
+                                }
                             }
-                        }
-                        Err(goblin::error::Error::BadMagic(magic_number)) => {
-                            log::trace!("Magic number {magic_number} not handled by goblin MachO parser, falling back to our own");
-                            let mut rdr = Cursor::new(archive::MAGIC);
-                            // The magic number is 64 bits but it
-                            // seems to only be the first 32 bits of
-                            // the archive's magic number.
-                            let archive_magic = rdr.read_u32::<BigEndian>().unwrap() as u64;
-                            if magic_number == archive_magic {
-                                log::trace!("Entry is an archive");
+                            SingleArch::Archive(archive) => {
                                 let content = &object_contents[i];
                                 let arch = fat.iter_arches().nth(arch_position).unwrap().unwrap();
                                 let start = arch.offset as usize;
                                 let end = (arch.offset + arch.size) as usize;
                                 let bytes = &content[start..end];
-                                let archive = archive::Archive::parse(bytes).unwrap();
                                 for member_name in archive.members() {
                                     let member_bytes = archive.extract(member_name, bytes).unwrap();
                                     let macho = MachO::parse(member_bytes, 0).unwrap();
@@ -206,7 +194,7 @@ fn main() {
                                     }
                                 }
                             }
-                        }
+                        },
                         Err(e) => panic!("{}", e),
                     }
                 }
@@ -346,21 +334,7 @@ fn main() {
 
     for dylib in dylibs {
         match dylib {
-            Dylib::MachO(m) => {
-                for symbol in m.symbols() {
-                    let (name, nlist) = symbol.unwrap();
-                    println!(
-                        "{}:\t{:?}, type={}, global={}, weak={}, undefined={}, stab={}",
-                        name,
-                        Nlist64::from(nlist.clone()),
-                        nlist.type_str(),
-                        nlist.is_global(),
-                        nlist.is_weak(),
-                        nlist.is_undefined(),
-                        nlist.is_stab(),
-                    );
-                }
-            }
+            Dylib::MachO(_) => todo!(),
             Dylib::Tbd(tbd) => {
                 for export in &tbd.exports {
                     if undefined_symbols.contains(export) {
@@ -372,8 +346,53 @@ fn main() {
         }
     }
 
-    for symbol in symbols {
-        println!("{:?}", symbol)
+    let mut segments: HashMap<String, HashMap<String, HashMap<String, &Symbol>>> = HashMap::new();
+    for symbol in symbols.values() {
+        let section_number = symbol.nlist.n_sect;
+        if section_number != 0 {
+            // Sections numbers, as given in the Mach-O binary, are
+            // 1-based.
+            let section_index = section_number - 1;
+            match &symbol.object {
+                Dylib::MachO(macho) => {
+                    let (section, _section_data) = macho
+                        .segments
+                        .sections()
+                        .flatten()
+                        .nth(section_index)
+                        .unwrap()
+                        .unwrap();
+                    let section_name = section.name().unwrap();
+                    let segment_name = section.segname().unwrap();
+                    if let Some(sections) = segments.get_mut(segment_name) {
+                        if let Some(section) = sections.get_mut(section_name) {
+                            section.insert(symbol.name.to_string(), symbol);
+                        } else {
+                            let mut section = HashMap::new();
+                            section.insert(symbol.name.to_string(), symbol);
+                            sections.insert(section_name.to_string(), section);
+                        };
+                    } else {
+                        let mut sections = HashMap::new();
+                        let mut section = HashMap::new();
+                        section.insert(symbol.name.to_string(), symbol);
+                        sections.insert(section_name.to_string(), section);
+                        segments.insert(segment_name.to_string(), sections);
+                    }
+                }
+                Dylib::Tbd(_) => todo!(),
+            }
+        }
+    }
+
+    for (segment_name, sections) in segments {
+        println!("{}", segment_name);
+        for (section_name, symbols) in sections {
+            println!("\t{}", section_name);
+            for (symbol_name, _) in symbols {
+                println!("\t\t{}", symbol_name);
+            }
+        }
     }
 
     if !undefined_symbols.is_empty() {
@@ -384,8 +403,8 @@ fn main() {
     }
 
     let fh = std::fs::File::create(&args.output_file).unwrap();
-    use std::os::unix::prelude::PermissionsExt;
-    fh.set_permissions(Permissions::from_mode(0o0777)).unwrap();
+    // Make rwx by all.
+    fh.set_permissions(Permissions::from_mode(0o777)).unwrap();
     // executable.write(fh).unwrap();
 }
 

@@ -11,7 +11,7 @@ edition = "2021"
 [dependencies]
 env_logger = { version = "0.9.0", default_features = false }
 faerie = "0.16.0"
-goblin = { version = "0.5.2" }
+goblin = { git = "https://github.com/nick96/goblin", branch = "multi-arch-with-archives" }
 log = { version = "0.4.17", default_features = false }
 target-lexicon = "0.11"
 text-stub-library = { git = "https://github.com/nick96/PyOxidizer.git", branch = "main" }
