@@ -148,6 +148,7 @@ fn main() {
         .iter()
         .enumerate()
         .map(|(i, object_content)| {
+            log::debug!("Parsing {}", object_files[i].display());
             Object::parse(object_content.as_slice())
                 .map_err(|e| e.to_string() + &format!(" xxx {}", i))
                 .unwrap()
