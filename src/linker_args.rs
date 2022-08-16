@@ -4,7 +4,7 @@ use std::{
 };
 pub(crate) use std::{path::PathBuf, str::FromStr};
 
-use llvm_option_parser::{ParsedArgument, ParsedArguments};
+use llvm_option_parser::ParsedArguments;
 
 #[derive(Debug, Clone)]
 pub enum Architecture {
