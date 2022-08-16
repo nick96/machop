@@ -6,7 +6,8 @@ use crate::linker_args::Architecture;
 #[derive(Debug)]
 pub enum Error {
     ParseError(String),
-    NoValidDocument,
+    Utf8Error(std::str::Utf8Error),
+    InvalidDocument,
 }
 
 impl std::error::Error for Error {}
@@ -18,8 +19,8 @@ impl From<text_stub_library::ParseError> for Error {
 }
 
 impl From<std::str::Utf8Error> for Error {
-    fn from(_: std::str::Utf8Error) -> Self {
-        todo!()
+    fn from(e: std::str::Utf8Error) -> Self {
+        Self::Utf8Error(e)
     }
 }
 
@@ -27,7 +28,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::ParseError(s) => write!(f, "{}", s),
-            Error::NoValidDocument => write!(f, "No valid documents found"),
+            Error::InvalidDocument => write!(f, "No valid documents found"),
+            Error::Utf8Error(e) => write!(f, "{}", e),
         }
     }
 }
@@ -57,7 +59,7 @@ impl TbdDylib {
             })
             .collect::<Result<Vec<TbdDylib>, Error>>()?;
         if tbds.is_empty() {
-            return Err(Error::NoValidDocument);
+            return Err(Error::InvalidDocument);
         };
         // We know there is at least one element in tbds so this won't
         // panic.
