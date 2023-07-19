@@ -2,7 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     fmt::Display,
 };
-pub(crate) use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 
 use llvm_option_parser::ParsedArguments;
 
